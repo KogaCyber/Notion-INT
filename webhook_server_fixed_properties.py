@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Notion Webhook Server - Исправленная версия с поддержкой page.properties_updated
+Notion Webhook Server - Полное извлечение ВСЕХ данных из Notion
 Сервер для получения webhook уведомлений от Notion API
 """
 
@@ -11,7 +11,7 @@ import hmac
 import hashlib
 import json
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, List
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 import uvicorn
@@ -51,25 +51,143 @@ class WebhookProcessor:
         self.logger.info("Пропускаем проверку подписи для отладки")
         return True
     
-    def extract_all_fields(self, page_data: Dict) -> Dict:
-        """Извлечение всех полей из страницы Notion"""
+    def get_database_name(self, database_id: str) -> str:
+        """Получение названия базы данных"""
+        try:
+            database_data = notion_client.client.databases.retrieve(database_id=database_id)
+            if database_data and 'title' in database_data and database_data['title']:
+                return database_data['title'][0].get('plain_text', 'Unknown Database')
+            return 'Unknown Database'
+        except Exception as e:
+            self.logger.error(f"Ошибка получения названия базы данных {database_id}: {e}")
+            return 'Unknown Database'
+    
+    def get_hierarchy_components(self, page_id: str, database_id: str = None) -> Dict[str, str]:
+        """Получение компонентов иерархии отдельно"""
+        try:
+            hierarchy = {
+                'department': '',
+                'project': '',
+                'tasks': ''
+            }
+            
+            if database_id:
+                self.logger.info(f"Using database_id from webhook: {database_id}")
+                database_name = self.get_database_name(database_id)
+                hierarchy['tasks'] = database_name
+                
+                # Получаем иерархию базы данных
+                try:
+                    database_data = notion_client.client.databases.retrieve(database_id=database_id)
+                    db_parent = database_data.get('parent', {})
+                    self.logger.info(f"Database parent: {db_parent}")
+                    
+                    if db_parent.get('type') == 'page_id':
+                        parent_page_id = db_parent.get('page_id')
+                        self.logger.info(f"Getting database parent page: {parent_page_id}")
+                        page_data = notion_client.get_page_data(parent_page_id)
+                        if page_data:
+                            # Получаем заголовок родительской страницы
+                            title = "No Title"
+                            if 'properties' in page_data:
+                                for prop_name, prop_value in page_data['properties'].items():
+                                    if prop_value.get('type') == 'title':
+                                        title_array = prop_value.get('title', [])
+                                        if title_array:
+                                            title = title_array[0].get('plain_text', 'No Title')
+                                            break
+                            hierarchy['project'] = title
+                            
+                            # Проверяем родителя страницы
+                            parent = page_data.get('parent', {})
+                            if parent.get('type') == 'page_id':
+                                parent_page_id = parent.get('page_id')
+                                parent_page_data = notion_client.get_page_data(parent_page_id)
+                                if parent_page_data:
+                                    parent_title = "No Title"
+                                    if 'properties' in parent_page_data:
+                                        for prop_name, prop_value in parent_page_data['properties'].items():
+                                            if prop_value.get('type') == 'title':
+                                                title_array = prop_value.get('title', [])
+                                                if title_array:
+                                                    parent_title = title_array[0].get('plain_text', 'No Title')
+                                                    break
+                                    hierarchy['department'] = parent_title
+                    elif db_parent.get('type') == 'block_id':
+                        # База данных находится внутри блока
+                        block_id = db_parent.get('block_id')
+                        self.logger.info(f"Getting database parent block: {block_id}")
+                        try:
+                            block_data = notion_client.client.blocks.retrieve(block_id=block_id)
+                            if block_data.get('type') == 'toggle':
+                                toggle_text = block_data.get('toggle', {}).get('rich_text', [])
+                                if toggle_text:
+                                    block_title = toggle_text[0].get('plain_text', 'Unknown Block')
+                                    self.logger.info(f"Block title: {block_title}")
+                                    hierarchy['project'] = block_title
+                            
+                            # Получаем иерархию родительского блока
+                            block_parent = block_data.get('parent', {})
+                            self.logger.info(f"Block parent: {block_parent}")
+                            if block_parent.get('type') == 'page_id':
+                                parent_page_id = block_parent.get('page_id')
+                                self.logger.info(f"Getting block parent page: {parent_page_id}")
+                                parent_page_data = notion_client.get_page_data(parent_page_id)
+                                if parent_page_data:
+                                    parent_title = "No Title"
+                                    if 'properties' in parent_page_data:
+                                        for prop_name, prop_value in parent_page_data['properties'].items():
+                                            if prop_value.get('type') == 'title':
+                                                title_array = prop_value.get('title', [])
+                                                if title_array:
+                                                    parent_title = title_array[0].get('plain_text', 'No Title')
+                                                    break
+                                    hierarchy['department'] = parent_title
+                        except Exception as e:
+                            self.logger.error(f"Ошибка получения блока {block_id}: {e}")
+                except Exception as e:
+                    self.logger.error(f"Ошибка получения базы данных {database_id}: {e}")
+            
+            return hierarchy
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка получения компонентов иерархии для {page_id}: {e}")
+            return {'department': '', 'project': '', 'tasks': ''}
+    
+    def extract_all_fields(self, page_data: Dict, database_id: str = None) -> Dict:
+        """Извлечение ВСЕХ полей из страницы Notion"""
         try:
             properties = page_data.get('properties', {})
             
-            # Извлекаем все нужные поля
+            # Получаем компоненты иерархии отдельно
+            hierarchy_components = self.get_hierarchy_components(page_data.get('id', ''), database_id)
+            
+            # Извлекаем ВСЕ возможные поля
             extracted_data = {
                 'id': page_data.get('id', ''),
                 'title': self._extract_title(properties),
+                'department': hierarchy_components.get('department', ''),
+                'project': hierarchy_components.get('project', ''),
+                'tasks': hierarchy_components.get('tasks', ''),
                 'description': self._extract_rich_text(properties, 'Description'),
                 'status': self._extract_status(properties, 'Status'),
                 'deadline': self._extract_date(properties, 'Deadline'),
+                'start_date': self._extract_date(properties, 'Start Date'),
                 'executor': self._extract_people(properties, 'Executor'),
                 'assigned_by': self._extract_people(properties, 'Assigned By'),
                 'telegram_username': self._extract_multi_select(properties, 'Telegram Username'),
-                'project': self._extract_relation(properties, 'Projects (1)'),
+                'project_relation': self._extract_relation(properties, 'Projects (1)'),
+                'parent_item': self._extract_relation(properties, 'Parent item'),
+                'blocked_by': self._extract_relation(properties, 'Blocked by'),
+                'blocking': self._extract_relation(properties, 'Blocking'),
+                'sub_item': self._extract_relation(properties, 'Sub-item'),
+                'strategy_file': self._extract_files(properties, 'Strategy file'),
+                'strategy_link': self._extract_url(properties, 'Strategy Link'),
                 'url': page_data.get('url', ''),
                 'created_time': self._extract_created_time(page_data),
-                'last_edited_time': self._extract_last_edited_time(page_data)
+                'last_edited_time': self._extract_last_edited_time(page_data),
+                'archived': page_data.get('archived', False),
+                'in_trash': page_data.get('in_trash', False)
             }
             
             return extracted_data
@@ -126,23 +244,38 @@ class WebhookProcessor:
         return []
     
     def _extract_relation(self, properties: Dict, prop_name: str) -> str:
-        """Извлечение связи с получением названия проекта"""
+        """Извлечение связи с получением названия"""
         prop = properties.get(prop_name, {})
         if prop.get('type') == 'relation':
             relation_array = prop.get('relation', [])
             if relation_array:
-                project_id = relation_array[0].get('id', '')
-                # Получаем название проекта из связанной страницы
+                related_id = relation_array[0].get('id', '')
+                # Получаем название связанной страницы
                 try:
-                    project_data = notion_client.get_page_data(project_id)
-                    if project_data:
-                        project_title = self._extract_title(project_data.get('properties', {}))
-                        return project_title if project_title else f"Project (ID: {project_id})"
+                    related_data = notion_client.get_page_data(related_id)
+                    if related_data:
+                        related_title = self._extract_title(related_data.get('properties', {}))
+                        return related_title if related_title else f"Related (ID: {related_id})"
                     else:
-                        return f"Project (ID: {project_id})"
+                        return f"Related (ID: {related_id})"
                 except Exception as e:
-                    self.logger.error(f"Ошибка получения названия проекта: {e}")
-                    return f"Project (ID: {project_id})"
+                    self.logger.error(f"Ошибка получения названия связанного элемента: {e}")
+                    return f"Related (ID: {related_id})"
+        return ''
+    
+    def _extract_files(self, properties: Dict, prop_name: str) -> list:
+        """Извлечение файлов"""
+        prop = properties.get(prop_name, {})
+        if prop.get('type') == 'files':
+            files_array = prop.get('files', [])
+            return [file.get('name', '') for file in files_array]
+        return []
+    
+    def _extract_url(self, properties: Dict, prop_name: str) -> str:
+        """Извлечение URL"""
+        prop = properties.get(prop_name, {})
+        if prop.get('type') == 'url' and prop.get('url'):
+            return prop['url']
         return ''
     
     def _extract_created_time(self, page_data: Dict) -> str:
@@ -168,77 +301,56 @@ class WebhookProcessor:
         return ''
     
     def format_enhanced_telegram_message(self, data: Dict, change_type: str = "updated") -> str:
-        """Форматирование улучшенного сообщения для Telegram"""
+        """Форматирование улучшенного сообщения для Telegram с ВСЕМИ данными"""
         try:
-            # Эмодзи для разных типов изменений
-            change_emoji = {
-                "created": "🆕",
-                "updated": "🔄", 
-                "properties_updated": "📝"
-            }.get(change_type, "��")
             
             # Определяем тип события
             if change_type == "page.created":
-                event_text = "**NEW TASK**"
+                event_text = "🔔 <b>NEW TASK</b>"
             elif change_type == "page.properties_updated":
-                event_text = "**TASK UPDATE**"
+                event_text = "🔔 <b>TASK UPDATE</b>"
             else:
-                event_text = "**TASK CHANGE**"
+                event_text = "🔔 <b>TASK CHANGE</b>"
             
-            # Эмодзи для статусов
-            status_emoji = {
-                "Bajarildi ✅": "✅",
-                "Yangi 🆕": "🆕",
-                "Accepted": "✅",
-                "In Progress": "🔄",
-                "Not Started": "⏳",
-                "Cancelled": "❌",
-                "On Hold": "⏸️",
-                "Review": "👀",
-                "Published": "🚀",
-                "Draft": "📝"
-            }.get(data.get('status', ''), "📋")
-            
-            message = f"{change_emoji} {event_text}\n"
-            message += f"📝 Title: {data.get('title', 'No Title')}\n\n"
-            
-            # Статус
-            if data.get('status'):
-                message += f"{status_emoji} Status: {data.get('status')}\n"
-            
-            # Проект
+            message = f"{event_text}\n"
+            if data.get('department'):
+                message += f"🏢 <b>Department:</b> {data.get('department')}\n"
             if data.get('project'):
-                message += f"📁 Project: {data.get('project')}\n"
+                message += f"📁 <b>Project:</b> {data.get('project')}\n"
+            if data.get('tasks'):
+                message += f"📋 <b>Tasks:</b> {data.get('tasks')}\n\n"
+
             
-            # Описание
+
+            message += f"📌 <b>Title:</b> {data.get('title', 'No Title')}\n"
+
             if data.get('description'):
-                desc = data.get('description')[:200] + "..." if len(data.get('description', '')) > 200 else data.get('description')
-                message += f"📄 Description: {desc}\n"
+                desc = data.get('description')
+                message += f"📝 <b>Description:</b> {desc}\n\n"
             
+            if data.get('status'):
+                message += f"🔹 <b>Status:</b> {data.get('status')}\n"
+
             # Исполнитель
             if data.get('executor'):
-                message += f"👤 Executor: {data.get('executor')}\n"
+                message += f"👤 <b>Executor:</b> {data.get('executor')}\n"
             
             # Назначил
             if data.get('assigned_by'):
-                message += f"👨‍💼 Assigned by: {data.get('assigned_by')}\n"
+                message += f"👨‍💼 <b>Assigned by:</b> {data.get('assigned_by')}\n"
             
             # Дедлайн
             if data.get('deadline'):
-                message += f"⏰ Deadline: {data.get('deadline')}\n"
+                message += f"⏰ <b>Deadline:</b> {data.get('deadline')}\n"
             
             # Telegram пользователи
             if data.get('telegram_username'):
                 telegram_str = " ".join([f"{user}" for user in data.get('telegram_username', [])])
-                message += f"📱 Telegram: {telegram_str}\n"
-            
-            # Время изменения
-            if data.get('last_edited_time'):
-                message += f"🕒 Modified: {data.get('last_edited_time')}\n"
-            
+                message += f"📱 <b>Telegram:</b> {telegram_str}\n"
+
             # Ссылка
             if data.get('url'):
-                message += f"\n🔗 [Open in Notion]({data.get('url')})"
+                message += f"\n🔗 <a href='{data.get('url')}'>Open in Notion</a>"
             
             return message
             
@@ -268,12 +380,20 @@ class WebhookProcessor:
                 page_id = entity.get('id')
                 
                 if entity_type == 'page' and page_id:
+                    # Получаем database_id из данных события
+                    database_id = None
+                    if 'data' in event_data and 'parent' in event_data['data']:
+                        parent_data = event_data['data']['parent']
+                        if parent_data.get('type') == 'database':
+                            database_id = parent_data.get('id')
+                            self.logger.info(f"Found database_id in webhook data: {database_id}")
+                    
                     if event_type == 'page.properties_updated':
                         updated_properties = event_data.get('data', {}).get('updated_properties', [])
                         self.logger.info(f"Обрабатываем страницу (новый формат): {page_id}, свойства: {updated_properties}")
                     else:
                         self.logger.info(f"Обрабатываем страницу (новый формат): {page_id}")
-                    return await self._process_page_event(event_type, page_id)
+                    return await self._process_page_event(event_type, page_id, database_id)
                 else:
                     self.logger.warning(f"Неверная структура entity: type={entity_type}, id={page_id}")
                     return False
@@ -296,7 +416,7 @@ class WebhookProcessor:
             self.logger.error(f"Ошибка при обработке webhook события: {e}")
             return False
     
-    async def _process_page_event(self, event_type: str, page_id: str) -> bool:
+    async def _process_page_event(self, event_type: str, page_id: str, database_id: str = None) -> bool:
         """Обработка события страницы с полными данными"""
         try:
             # Получаем данные страницы из Notion
@@ -305,8 +425,8 @@ class WebhookProcessor:
                 self.logger.warning(f"Не удалось получить данные страницы {page_id}")
                 return False
             
-            # Извлекаем все поля
-            extracted_data = self.extract_all_fields(page_data)
+            # Извлекаем ВСЕ поля с database_id
+            extracted_data = self.extract_all_fields(page_data, database_id)
             self.logger.info(f"Извлеченные данные: {extracted_data}")
             
             # Форматируем улучшенное сообщение
@@ -354,7 +474,7 @@ async def startup_event():
 @app.get("/")
 async def root():
     """Корневой endpoint для проверки работы"""
-    return {"message": "Notion-Telegram Webhook Server FIXED WITH FULL DATA", "status": "running"}
+    return {"message": "Notion-Telegram Webhook Server - SEPARATED HIERARCHY", "status": "running"}
 
 @app.get("/health")
 async def health_check():
@@ -416,7 +536,7 @@ async def test_send(request: Request):
     """Тестовая отправка сообщения"""
     try:
         data = await request.json()
-        message = data.get('message', 'Test webhook with full data')
+        message = data.get('message', 'Test webhook with separated hierarchy')
         
         if telegram_client:
             success = await telegram_client.send_custom_message(message)
@@ -434,7 +554,7 @@ async def test_send(request: Request):
 if __name__ == "__main__":
     host = os.getenv('WEBHOOK_HOST', '0.0.0.0')
     port = int(os.getenv('WEBHOOK_PORT', 8000))
-    logger.info(f"Запуск webhook сервера с полными данными на {host}:{port}")
+    logger.info(f"Запуск webhook сервера с разделенной иерархией на {host}:{port}")
     uvicorn.run(
         "webhook_server_fixed_properties:app",
         host=host,

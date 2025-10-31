@@ -187,7 +187,7 @@ class TelegramIntegration:
             await self.bot.send_message(
                 chat_id=self.channel_id,
                 text=message,
-                parse_mode=None  # Отключаем Markdown
+                parse_mode="HTML"  # Отключаем Markdown
             )
             
             self.logger.info("Пользовательское сообщение отправлено")
