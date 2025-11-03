@@ -10,6 +10,8 @@ import logging
 import hmac
 import hashlib
 import json
+import re
+import threading
 from datetime import datetime
 from typing import Dict, Any, List
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
@@ -19,6 +21,8 @@ from dotenv import load_dotenv
 
 from notion_integration import NotionIntegration
 from telegram_client import TelegramIntegration
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -39,6 +43,7 @@ app = FastAPI(title="Notion-Telegram Webhook", version="1.0.0")
 # Инициализация клиентов
 notion_client = None
 telegram_client = None
+telegram_app = None  # Для обработки сообщений из Telegram
 
 class WebhookProcessor:
     def __init__(self):
@@ -432,8 +437,46 @@ class WebhookProcessor:
             # Форматируем улучшенное сообщение
             formatted_message = self.format_enhanced_telegram_message(extracted_data, event_type)
             
-            # Отправляем в Telegram с полными данными
-            success = await telegram_client.send_custom_message(formatted_message)
+            # Создаем inline кнопки для изменения статуса
+            reply_markup = None
+            if page_id and notion_client:
+                try:
+                    # Получаем доступные статусы
+                    self.logger.info(f"Получение опций статуса для страницы {page_id}...")
+                    status_options = notion_client.get_page_status_options(page_id)
+                    self.logger.info(f"Получены опции статуса: {status_options}")
+                    
+                    if status_options and len(status_options) > 0:
+                        keyboard = []
+                        # Группируем кнопки по 2 в ряд
+                        for i in range(0, len(status_options), 2):
+                            row = []
+                            status1 = status_options[i]
+                            callback1 = f"status:{page_id}:{status1}"
+                            self.logger.info(f"Создаем кнопку: {status1} с callback: {callback1}")
+                            row.append(InlineKeyboardButton(
+                                status1,
+                                callback_data=callback1
+                            ))
+                            if i + 1 < len(status_options):
+                                status2 = status_options[i + 1]
+                                callback2 = f"status:{page_id}:{status2}"
+                                self.logger.info(f"Создаем кнопку: {status2} с callback: {callback2}")
+                                row.append(InlineKeyboardButton(
+                                    status2,
+                                    callback_data=callback2
+                                ))
+                            keyboard.append(row)
+                        
+                        reply_markup = InlineKeyboardMarkup(keyboard)
+                        self.logger.info(f"Создано {len(keyboard)} рядов кнопок для изменения статуса")
+                    else:
+                        self.logger.warning(f"Нет опций статуса для страницы {page_id}")
+                except Exception as e:
+                    self.logger.error(f"Ошибка при создании кнопок статуса: {e}", exc_info=True)
+            
+            # Отправляем в Telegram с полными данными и кнопками
+            success = await telegram_client.send_custom_message(formatted_message, reply_markup=reply_markup)
             if success:
                 self.logger.info(f"Событие {event_type} с полными данными успешно обработано для страницы {page_id}")
             else:
@@ -448,10 +491,168 @@ class WebhookProcessor:
 # Инициализация процессора
 webhook_processor = WebhookProcessor()
 
+# Обработчики Telegram сообщений
+async def start_command(update: Update, context):
+    """Обработчик команды /start"""
+    try:
+        logger.info(f"Получена команда /start от {update.message.from_user.username}")
+        await update.message.reply_text(
+            "Привет! Я бот для управления задачами в Notion.\n\n"
+            "Как использовать:\n"
+            "1. Когда приходит уведомление о задаче, используйте кнопки под сообщением для изменения статуса\n"
+            "2. Или используйте команду: /status <page_id>\n\n"
+            "Нажмите на кнопки статуса под сообщениями о задачах!"
+        )
+    except Exception as e:
+        logger.error(f"Ошибка в start_command: {e}", exc_info=True)
+
+async def handle_message(update: Update, context):
+    """Обработчик текстовых сообщений"""
+    try:
+        text = update.message.text.strip()
+        chat_id = update.message.chat_id
+        
+        logger.info(f"Получено сообщение от {chat_id}: {text}")
+        
+        # Если сообщение начинается с /status, обрабатываем команду
+        if text.startswith('/status '):
+            page_id = text.replace('/status ', '').strip()
+            if page_id and notion_client:
+                # Получаем доступные статусы
+                status_options = notion_client.get_page_status_options(page_id)
+                if status_options:
+                    keyboard = []
+                    for status in status_options:
+                        keyboard.append([InlineKeyboardButton(
+                            status, 
+                            callback_data=f"status:{page_id}:{status}"
+                        )])
+                    
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    await update.message.reply_text(
+                        "Выберите новый статус:",
+                        reply_markup=reply_markup
+                    )
+                else:
+                    await update.message.reply_text("Не удалось получить список статусов")
+            else:
+                await update.message.reply_text("Использование: /status <page_id>")
+        else:
+            # Простое сообщение - создаем страницу в Notion
+            await update.message.reply_text("Для изменения статуса используйте: /status <page_id>")
+    except Exception as e:
+        logger.error(f"Ошибка в handle_message: {e}")
+        if update.message:
+            await update.message.reply_text(f"Ошибка: {str(e)}")
+
+async def handle_callback(update: Update, context):
+    """Обработчик callback от inline кнопок"""
+    global notion_client
+    try:
+        query = update.callback_query
+        data = query.data
+        user = query.from_user
+        
+        logger.info(f"🔔 Получен callback от {user.username or user.first_name}: {data}")
+        logger.info(f"Полная информация о callback: update_id={update.update_id}, user_id={user.id}")
+        
+        # Проверяем доступность notion_client
+        if notion_client is None:
+            logger.error("❌ notion_client is None в handle_callback!")
+            await query.answer("❌ Notion клиент не инициализирован", show_alert=True)
+            return
+        
+        logger.info(f"✅ notion_client доступен: {type(notion_client)}")
+        
+        # Сначала отвечаем на callback
+        await query.answer()
+        
+        if data.startswith('status:'):
+            # Формат: status:page_id:status_name
+            parts = data.split(':')
+            if len(parts) == 3:
+                page_id = parts[1]
+                status_name = parts[2]
+                
+                logger.info(f"Обновление статуса для страницы {page_id} на {status_name}")
+                
+                if notion_client:
+                    # Находим название свойства статуса
+                    try:
+                        page = notion_client.client.pages.retrieve(page_id=page_id)
+                        properties = page.get('properties', {})
+                        status_property_name = None
+                        
+                        for prop_name, prop_data in properties.items():
+                            if prop_data.get('type') == 'status':
+                                status_property_name = prop_name
+                                break
+                        
+                        if status_property_name:
+                            logger.info(f"Найдено свойство статуса: {status_property_name}")
+                            
+                            # Обновляем статус в Notion
+                            success = notion_client.update_page_property(
+                                page_id=page_id,
+                                property_name=status_property_name,
+                                property_value=status_name
+                            )
+                            
+                            if success:
+                                logger.info(f"Статус успешно обновлен в Notion: {status_name}")
+                                
+                                # Получаем текущее сообщение
+                                message_text = query.message.text
+                                
+                                # Обновляем статус в тексте сообщения
+                                updated_text = re.sub(
+                                    r'🔹 <b>Status:</b> .+',
+                                    f'🔹 <b>Status:</b> {status_name}',
+                                    message_text
+                                )
+                                
+                                # Обновляем сообщение
+                                try:
+                                    await query.edit_message_text(
+                                        text=updated_text,
+                                        parse_mode="HTML",
+                                        reply_markup=query.message.reply_markup
+                                    )
+                                    
+                                    # Отправляем подтверждение
+                                    await query.answer(f"✅ Статус изменен на: {status_name}", show_alert=False)
+                                except Exception as e:
+                                    logger.error(f"Ошибка при обновлении сообщения: {e}")
+                                    await query.answer(f"✅ Статус обновлен: {status_name}", show_alert=True)
+                            else:
+                                logger.error("Не удалось обновить статус в Notion")
+                                await query.answer("❌ Ошибка при обновлении статуса в Notion", show_alert=True)
+                        else:
+                            logger.warning("Свойство статуса не найдено")
+                            await query.answer("❌ Свойство статуса не найдено", show_alert=True)
+                    except Exception as e:
+                        logger.error(f"Ошибка при обработке callback: {e}", exc_info=True)
+                        await query.answer(f"❌ Ошибка: {str(e)}", show_alert=True)
+                else:
+                    logger.error("Notion клиент не инициализирован")
+                    await query.answer("❌ Notion клиент не инициализирован", show_alert=True)
+            else:
+                logger.warning(f"Неверный формат callback data: {data}")
+                await query.answer("❌ Неверный формат данных", show_alert=True)
+        else:
+            logger.warning(f"Неизвестный тип callback: {data}")
+            await query.answer("❌ Неизвестная команда", show_alert=True)
+    except Exception as e:
+        logger.error(f"Критическая ошибка в handle_callback: {e}", exc_info=True)
+        try:
+            await query.answer(f"❌ Критическая ошибка: {str(e)}", show_alert=True)
+        except:
+            pass
+
 @app.on_event("startup")
 async def startup_event():
     """Инициализация при запуске"""
-    global notion_client, telegram_client
+    global notion_client, telegram_client, telegram_app
     
     try:
         notion_client = NotionIntegration(
@@ -468,6 +669,52 @@ async def startup_event():
             channel_id=os.getenv('TELEGRAM_CHANNEL_ID')
         )
         logger.info("Telegram клиент инициализирован")
+        
+        # Инициализируем Telegram Application для обработки сообщений
+        bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
+        if bot_token:
+            global telegram_app
+            telegram_app = Application.builder().token(bot_token).build()
+            
+            # Добавляем обработчики
+            logger.info("Добавление обработчиков Telegram...")
+            telegram_app.add_handler(CommandHandler("start", start_command))
+            telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+            telegram_app.add_handler(CallbackQueryHandler(handle_callback))
+            logger.info("✅ Обработчики Telegram добавлены: start_command, handle_message, handle_callback")
+            
+            # Запускаем polling в отдельном потоке
+            def run_polling():
+                """Запуск polling в отдельном потоке"""
+                try:
+                    logger.info("Создание нового event loop для Telegram polling...")
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    
+                    async def init_and_run():
+                        logger.info("Инициализация Telegram Application...")
+                        await telegram_app.initialize()
+                        logger.info("Запуск Telegram Application...")
+                        await telegram_app.start()
+                        logger.info("Telegram bot инициализирован и запущен, начинаем polling...")
+                        await telegram_app.updater.start_polling(
+                            drop_pending_updates=True,
+                            allowed_updates=['message', 'callback_query']
+                        )
+                        logger.info("✅ Telegram bot polling успешно запущен и работает!")
+                    
+                    logger.info("Запуск async функций в event loop...")
+                    loop.run_until_complete(init_and_run())
+                    logger.info("Event loop запущен, polling работает...")
+                    loop.run_forever()
+                except Exception as e:
+                    logger.error(f"Ошибка при запуске Telegram polling: {e}", exc_info=True)
+            
+            # Запускаем в отдельном потоке
+            logger.info("Создание потока для Telegram polling...")
+            polling_thread = threading.Thread(target=run_polling, daemon=True, name="TelegramPolling")
+            polling_thread.start()
+            logger.info("✅ Поток для Telegram polling запущен")
     except Exception as e:
         logger.error(f"Ошибка инициализации Telegram клиента: {e}")
 
@@ -550,6 +797,104 @@ async def test_send(request: Request):
     except Exception as e:
         logger.error(f"Ошибка при тестовой отправке: {e}")
         return {"status": "error", "message": str(e)}
+
+@app.post("/telegram/webhook")
+async def telegram_webhook(request: Request):
+    """Обработка входящих сообщений из Telegram для создания страниц в Notion"""
+    try:
+        data = await request.json()
+        logger.info(f"Получено сообщение из Telegram: {json.dumps(data, indent=2)}")
+        
+        # Обработка обновления от Telegram
+        update_type = data.get('update_id')
+        message = data.get('message', {})
+        
+        if not message:
+            # Это может быть другое обновление (редактирование, callback и т.д.)
+            return {"status": "ok", "message": "Update processed"}
+        
+        # Получаем текст сообщения
+        text = message.get('text', '').strip()
+        if not text:
+            return {"status": "ok", "message": "No text in message"}
+        
+        # Получаем информацию об отправителе
+        from_user = message.get('from', {})
+        user_name = from_user.get('username', from_user.get('first_name', 'Unknown'))
+        
+        logger.info(f"Сообщение от {user_name}: {text}")
+        
+        # Проверяем, что у нас есть notion_client
+        if not notion_client:
+            logger.error("Notion клиент не инициализирован")
+            return {"status": "error", "message": "Notion client not initialized"}
+        
+        # Получаем database_id из переменных окружения
+        database_id = os.getenv('NOTION_DATABASE_ID')
+        if not database_id:
+            logger.error("NOTION_DATABASE_ID не указан")
+            return {"status": "error", "message": "Database ID not configured"}
+        
+        # Создаем страницу в Notion
+        # Форматируем заголовок: первые 100 символов текста
+        title = text[:100] if len(text) > 100 else text
+        
+        # Создаем страницу
+        created_page = notion_client.create_page(
+            title=title,
+            database_id=database_id
+        )
+        
+        if created_page:
+            page_id = created_page.get('id')
+            page_url = created_page.get('url', '')
+            
+            # Добавляем полный текст как содержимое страницы
+            if len(text) > 100:
+                notion_client.add_content_to_page(page_id, text)
+            
+            # Добавляем метаданные (от кого сообщение)
+            metadata_text = f"\n\nОт: {user_name} (@{from_user.get('username', 'unknown')})"
+            if from_user.get('first_name'):
+                metadata_text += f" ({from_user.get('first_name')})"
+            if from_user.get('last_name'):
+                metadata_text += f" {from_user.get('last_name')}"
+            
+            notion_client.add_content_to_page(page_id, metadata_text)
+            
+            logger.info(f"Создана страница в Notion: {page_url}")
+            
+            # Отправляем подтверждение в Telegram (если нужно)
+            if telegram_client:
+                response_text = f"✅ Страница создана в Notion!\n🔗 [Открыть]({page_url})"
+                await telegram_client.send_custom_message(response_text)
+            
+            return {
+                "status": "ok",
+                "message": "Page created",
+                "page_id": page_id,
+                "page_url": page_url
+            }
+        else:
+            logger.error("Не удалось создать страницу в Notion")
+            return {"status": "error", "message": "Failed to create page"}
+            
+    except Exception as e:
+        logger.error(f"Ошибка при обработке Telegram webhook: {e}")
+        return {"status": "error", "message": str(e)}
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Остановка при завершении"""
+    global telegram_app
+    if telegram_app:
+        try:
+            await telegram_app.updater.stop()
+            await telegram_app.stop()
+            await telegram_app.shutdown()
+            logger.info("Telegram bot остановлен")
+        except Exception as e:
+            logger.error(f"Ошибка при остановке Telegram bot: {e}")
 
 if __name__ == "__main__":
     host = os.getenv('WEBHOOK_HOST', '0.0.0.0')

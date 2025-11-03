@@ -173,12 +173,13 @@ class TelegramIntegration:
         except:
             return date_string
     
-    async def send_custom_message(self, message: str) -> bool:
+    async def send_custom_message(self, message: str, reply_markup=None) -> bool:
         """
         Отправка произвольного сообщения в канал
         
         Args:
             message: Текст сообщения
+            reply_markup: Inline клавиатура (опционально)
             
         Returns:
             True если сообщение отправлено успешно
@@ -187,7 +188,8 @@ class TelegramIntegration:
             await self.bot.send_message(
                 chat_id=self.channel_id,
                 text=message,
-                parse_mode="HTML"  # Отключаем Markdown
+                parse_mode="HTML",
+                reply_markup=reply_markup
             )
             
             self.logger.info("Пользовательское сообщение отправлено")
