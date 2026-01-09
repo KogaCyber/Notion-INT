@@ -469,7 +469,18 @@ class WebhookProcessor:
                             row = []
                             status1 = status_options[i]
                             callback1 = f"status:{page_id}:{status1}"
-                            self.logger.info(f"Создаем кнопку: {status1} с callback: {callback1}")
+                            callback1_len = len(callback1.encode('utf-8'))
+                            self.logger.info(f"Создаем кнопку: '{status1}' с callback: '{callback1}' (длина: {callback1_len} байт)")
+                            
+                            # Telegram ограничение: callback_data максимум 64 байта
+                            if callback1_len > 64:
+                                self.logger.warning(f"⚠️ Callback data слишком длинный ({callback1_len} > 64), обрезаем")
+                                # Обрезаем статус, оставляя место для префикса
+                                max_status_len = 64 - len(f"status:{page_id}:".encode('utf-8'))
+                                status1_short = status1[:max_status_len]
+                                callback1 = f"status:{page_id}:{status1_short}"
+                                self.logger.warning(f"⚠️ Обрезанный callback: '{callback1}'")
+                            
                             row.append(InlineKeyboardButton(
                                 status1,
                                 callback_data=callback1
@@ -477,7 +488,16 @@ class WebhookProcessor:
                             if i + 1 < len(status_options):
                                 status2 = status_options[i + 1]
                                 callback2 = f"status:{page_id}:{status2}"
-                                self.logger.info(f"Создаем кнопку: {status2} с callback: {callback2}")
+                                callback2_len = len(callback2.encode('utf-8'))
+                                self.logger.info(f"Создаем кнопку: '{status2}' с callback: '{callback2}' (длина: {callback2_len} байт)")
+                                
+                                if callback2_len > 64:
+                                    self.logger.warning(f"⚠️ Callback data слишком длинный ({callback2_len} > 64), обрезаем")
+                                    max_status_len = 64 - len(f"status:{page_id}:".encode('utf-8'))
+                                    status2_short = status2[:max_status_len]
+                                    callback2 = f"status:{page_id}:{status2_short}"
+                                    self.logger.warning(f"⚠️ Обрезанный callback: '{callback2}'")
+                                
                                 row.append(InlineKeyboardButton(
                                     status2,
                                     callback_data=callback2
@@ -578,8 +598,12 @@ async def handle_callback(update: Update, context):
         data = query.data
         user = query.from_user
         
-        logger.info(f"🔔 Получен callback от {user.username or user.first_name if user else 'Unknown'}: {data}")
-        logger.info(f"Полная информация о callback: update_id={update.update_id}, user_id={user.id if user else 'N/A'}")
+        logger.info(f"🔔 ===== CALLBACK RECEIVED =====")
+        logger.info(f"🔔 Callback data: {data}")
+        logger.info(f"🔔 От пользователя: {user.username or user.first_name if user else 'Unknown'} (ID: {user.id if user else 'N/A'})")
+        logger.info(f"🔔 Update ID: {update.update_id}")
+        logger.info(f"🔔 Message ID: {query.message.message_id if query.message else 'N/A'}")
+        logger.info(f"🔔 =============================")
         
         # Проверяем доступность notion_client
         if notion_client is None:
@@ -598,12 +622,14 @@ async def handle_callback(update: Update, context):
         
         if data.startswith('status:'):
             # Формат: status:page_id:status_name
-            parts = data.split(':')
+            # Важно: status_name может содержать двоеточия, поэтому используем split с ограничением
+            parts = data.split(':', 2)  # Разделяем максимум на 3 части
             if len(parts) == 3:
                 page_id = parts[1]
-                status_name = parts[2]
+                status_name = parts[2]  # Все что после второго двоеточия - это имя статуса
                 
-                logger.info(f"Обновление статуса для страницы {page_id} на {status_name}")
+                logger.info(f"🔄 Обновление статуса для страницы {page_id} на '{status_name}'")
+                logger.info(f"📋 Разобранный callback: page_id={page_id}, status_name={status_name}")
                 
                 if notion_client:
                     # Находим название свойства статуса
@@ -620,7 +646,33 @@ async def handle_callback(update: Update, context):
                         if status_property_name:
                             logger.info(f"Найдено свойство статуса: {status_property_name}")
                             
+                            # Получаем доступные опции статуса для проверки
+                            available_statuses = notion_client.get_page_status_options(page_id)
+                            logger.info(f"📋 Доступные статусы: {available_statuses}")
+                            logger.info(f"📋 Запрашиваемый статус: '{status_name}'")
+                            
+                            # Проверяем, что статус существует в опциях
+                            if status_name not in available_statuses:
+                                logger.warning(f"⚠️ Статус '{status_name}' не найден в доступных опциях!")
+                                logger.warning(f"⚠️ Доступные опции: {available_statuses}")
+                                # Пробуем найти похожий статус (без учета регистра)
+                                status_lower = status_name.lower()
+                                matching_status = None
+                                for avail_status in available_statuses:
+                                    if avail_status.lower() == status_lower:
+                                        matching_status = avail_status
+                                        logger.info(f"✅ Найден похожий статус (без учета регистра): '{matching_status}'")
+                                        break
+                                
+                                if matching_status:
+                                    status_name = matching_status
+                                    logger.info(f"🔄 Используем статус: '{status_name}'")
+                                else:
+                                    await query.answer(f"❌ Статус '{status_name}' не найден", show_alert=True)
+                                    return
+                            
                             # Обновляем статус в Notion
+                            logger.info(f"🔄 Обновление статуса в Notion: {status_property_name} = '{status_name}'")
                             success = notion_client.update_page_property(
                                 page_id=page_id,
                                 property_name=status_property_name,
@@ -669,17 +721,27 @@ async def handle_callback(update: Update, context):
                     logger.error("Notion клиент не инициализирован")
                     await query.answer("❌ Notion клиент не инициализирован", show_alert=True)
             else:
-                logger.warning(f"Неверный формат callback data: {data}")
-                await query.answer("❌ Неверный формат данных", show_alert=True)
+                logger.warning(f"⚠️ Неверный формат callback data: {data}")
+                logger.warning(f"⚠️ Ожидался формат: status:page_id:status_name")
+                logger.warning(f"⚠️ Получено частей после split: {len(parts)}")
+                try:
+                    await query.answer("❌ Неверный формат данных", show_alert=True)
+                except Exception as e:
+                    logger.error(f"Ошибка при отправке ответа: {e}")
         else:
-            logger.warning(f"Неизвестный тип callback: {data}")
-            await query.answer("❌ Неизвестная команда", show_alert=True)
+            logger.warning(f"⚠️ Неизвестный тип callback: {data}")
+            logger.warning(f"⚠️ Callback не начинается с 'status:'")
+            try:
+                await query.answer("❌ Неизвестная команда", show_alert=True)
+            except Exception as e:
+                logger.error(f"Ошибка при отправке ответа: {e}")
     except Exception as e:
-        logger.error(f"Критическая ошибка в handle_callback: {e}", exc_info=True)
+        logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА в handle_callback: {e}", exc_info=True)
         try:
-            await query.answer(f"❌ Критическая ошибка: {str(e)}", show_alert=True)
-        except:
-            pass
+            if update.callback_query:
+                await update.callback_query.answer(f"❌ Ошибка: {str(e)[:50]}", show_alert=True)
+        except Exception as e2:
+            logger.error(f"Не удалось отправить ответ об ошибке: {e2}")
 
 @app.on_event("startup")
 async def startup_event():
