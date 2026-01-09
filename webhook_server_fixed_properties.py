@@ -584,9 +584,13 @@ async def handle_message(update: Update, context):
 async def handle_callback(update: Update, context):
     """Обработчик callback от inline кнопок"""
     global notion_client
+    logger.info(f"🎯 ===== handle_callback ВЫЗВАН =====")
+    logger.info(f"🎯 Update ID: {update.update_id}")
+    logger.info(f"🎯 Context: {context}")
     try:
         if not update.callback_query:
             logger.error("❌ update.callback_query is None!")
+            logger.error(f"❌ Update object: {update}")
             return
         
         query = update.callback_query
@@ -1029,13 +1033,26 @@ async def telegram_webhook(request: Request):
         update_type = None
         if 'callback_query' in data:
             update_type = 'callback_query'
-            callback_data = data.get('callback_query', {}).get('data', 'N/A')
-            logger.info(f"📥 Получено обновление от Telegram: update_id={update_id}, тип=callback_query, data={callback_data}")
+            callback_query_data = data.get('callback_query', {})
+            callback_data = callback_query_data.get('data', 'N/A')
+            message_info = callback_query_data.get('message', {})
+            message_id = message_info.get('message_id', 'N/A')
+            from_user = callback_query_data.get('from', {})
+            user_info = f"{from_user.get('username', '')} ({from_user.get('id', 'N/A')})"
+            
+            logger.info(f"🔔 ===== CALLBACK_QUERY RECEIVED =====")
+            logger.info(f"🔔 Update ID: {update_id}")
+            logger.info(f"🔔 Callback data: {callback_data}")
+            logger.info(f"🔔 Message ID: {message_id}")
+            logger.info(f"🔔 От пользователя: {user_info}")
+            logger.info(f"🔔 Полные данные callback_query: {json.dumps(callback_query_data, indent=2, ensure_ascii=False)}")
+            logger.info(f"🔔 =====================================")
         elif 'message' in data:
             update_type = 'message'
             logger.info(f"📥 Получено обновление от Telegram: update_id={update_id}, тип=message")
         else:
             logger.info(f"📥 Получено обновление от Telegram: update_id={update_id}, тип=unknown, keys={list(data.keys())}")
+            logger.info(f"📥 Полные данные: {json.dumps(data, indent=2, ensure_ascii=False)}")
         
         # Создаем объект Update из данных
         try:
@@ -1046,13 +1063,20 @@ async def telegram_webhook(request: Request):
             
             # Проверяем тип обновления
             if update.callback_query:
-                logger.info(f"🔔 Обнаружен callback_query: {update.callback_query.data}")
+                logger.info(f"🔔 Update объект содержит callback_query: {update.callback_query.data}")
+                logger.info(f"🔔 Callback query ID: {update.callback_query.id}")
+                logger.info(f"🔔 Message: {update.callback_query.message.message_id if update.callback_query.message else 'N/A'}")
             elif update.message:
                 logger.info(f"💬 Обнаружено message: {update.message.text}")
             
             # Обрабатываем обновление через Application
-            await telegram_app.process_update(update)
-            logger.info(f"✅ Обновление {update.update_id} обработано")
+            logger.info(f"🔄 Передаем обновление в Application.process_update...")
+            try:
+                await telegram_app.process_update(update)
+                logger.info(f"✅ Обновление {update.update_id} успешно обработано через Application")
+            except Exception as e:
+                logger.error(f"❌ Ошибка при обработке обновления через Application: {e}", exc_info=True)
+                raise
             
             return JSONResponse(content={"status": "ok"})
             
