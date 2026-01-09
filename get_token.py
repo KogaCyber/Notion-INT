@@ -10,7 +10,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(message)s',
     handlers=[
-        logging.FileHandler('/home/max/notion_webhook.log'),  # Save in your home directory
+        logging.FileHandler('~/notionbot/test/Notion-INT/notion_webhook.log'),  # Save in your home directory
         logging.StreamHandler()
     ]
 )
