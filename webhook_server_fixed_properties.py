@@ -44,13 +44,61 @@ app = FastAPI(title="Notion-Telegram Webhook", version="1.0.0")
 async def log_requests(request: Request, call_next):
     """Логирование всех входящих запросов"""
     start_time = datetime.now()
-    logger.info(f"Входящий запрос: {request.method} {request.url.path}?{request.url.query}")
-    logger.info(f"Headers: {dict[str, str](request.headers)}")
+    path = request.url.path
+    headers = dict(request.headers)
+    
+    # Фильтрация подозрительных запросов (атаки/сканирование)
+    suspicious_indicators = [
+        'x-nextjs-request-id' in headers,
+        'x-nextjs-html-request-id' in headers,
+        'next-action' in headers,
+        path.startswith('/_next'),
+        path.startswith('/api/route') and path != '/api/route',
+        path == '/app' and request.method == 'POST',
+        'poop' in str(headers).lower(),
+        '__proto__' in str(headers).lower(),
+    ]
+    
+    if any(suspicious_indicators):
+        # Блокируем подозрительные запросы без логирования
+        client_ip = request.client.host if request.client else "unknown"
+        logger.warning(f"🚫 Блокирован подозрительный запрос от {client_ip}: {request.method} {path}")
+        return JSONResponse(
+            status_code=404,
+            content={"status": "not found"}
+        )
+    
+    # Разрешенные пути
+    allowed_paths = [
+        '/', '/health', '/notion-webhook', '/webhook/notion',
+        '/telegram/webhook', '/telegram/webhook/status',
+        '/test/notion-webhook', '/test/send'
+    ]
+    
+    # Логируем только разрешенные пути или POST на корневой путь (для Notion webhook)
+    if path in allowed_paths or (path == '/' and request.method == 'POST'):
+        # Особое логирование для Telegram webhook
+        if path == "/telegram/webhook":
+            logger.info(f"🌐 ===== TELEGRAM WEBHOOK REQUEST =====")
+            logger.info(f"🌐 Method: {request.method}")
+            logger.info(f"🌐 Path: {path}")
+            logger.info(f"🌐 Query: {request.url.query}")
+            logger.info(f"🌐 Headers: {headers}")
+            logger.info(f"🌐 Content-Type: {headers.get('content-type', 'N/A')}")
+            logger.info(f"🌐 Content-Length: {headers.get('content-length', 'N/A')}")
+        else:
+            logger.info(f"Входящий запрос: {request.method} {path}?{request.url.query}")
+    else:
+        # Для неизвестных путей - минимальное логирование
+        logger.debug(f"Запрос на неизвестный путь: {request.method} {path}")
     
     try:
         response = await call_next(request)
         process_time = (datetime.now() - start_time).total_seconds()
-        logger.info(f"Ответ: {response.status_code} за {process_time:.3f}с")
+        if path == "/telegram/webhook":
+            logger.info(f"🌐 Ответ: {response.status_code} за {process_time:.3f}с")
+        elif path in allowed_paths:
+            logger.info(f"Ответ: {response.status_code} за {process_time:.3f}с")
         return response
     except Exception as e:
         logger.error(f"Ошибка при обработке запроса: {e}", exc_info=True)
@@ -802,7 +850,14 @@ async def startup_event():
                 
                 # Проверяем информацию о webhook
                 webhook_info = await telegram_app.bot.get_webhook_info()
-                logger.info(f"Webhook info: {webhook_info}")
+                logger.info(f"📋 Webhook info: {webhook_info}")
+                logger.info(f"📋 Webhook URL: {webhook_info.url}")
+                logger.info(f"📋 Allowed updates: {webhook_info.allowed_updates}")
+                logger.info(f"📋 Pending updates: {webhook_info.pending_update_count}")
+                if webhook_info.allowed_updates:
+                    logger.info(f"✅ Callback_query включен в allowed_updates: {'callback_query' in webhook_info.allowed_updates}")
+                else:
+                    logger.warning("⚠️ allowed_updates не установлен!")
             except Exception as e:
                 logger.error(f"Ошибка при настройке Telegram webhook: {e}", exc_info=True)
     except Exception as e:
@@ -831,6 +886,34 @@ async def test_notion_webhook():
         "test_url": "/notion-webhook?verification=test_token",
         "timestamp": datetime.now().isoformat()
     }
+
+@app.get("/telegram/webhook/status")
+async def telegram_webhook_status():
+    """Проверка статуса Telegram webhook"""
+    try:
+        if not telegram_app:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "error", "message": "Telegram application not initialized"}
+            )
+        
+        webhook_info = await telegram_app.bot.get_webhook_info()
+        return {
+            "status": "ok",
+            "webhook_url": webhook_info.url,
+            "allowed_updates": webhook_info.allowed_updates,
+            "callback_query_enabled": "callback_query" in (webhook_info.allowed_updates or []),
+            "pending_updates": webhook_info.pending_update_count,
+            "has_custom_certificate": webhook_info.has_custom_certificate,
+            "ip_address": webhook_info.ip_address,
+            "max_connections": webhook_info.max_connections
+        }
+    except Exception as e:
+        logger.error(f"Ошибка при получении статуса webhook: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": str(e)}
+        )
 
 @app.get("/webhook/notion")
 async def webhook_verification(challenge: str = None, verification: str = None):
