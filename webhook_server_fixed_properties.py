@@ -565,12 +565,21 @@ async def handle_callback(update: Update, context):
     """Обработчик callback от inline кнопок"""
     global notion_client
     try:
+        if not update.callback_query:
+            logger.error("❌ update.callback_query is None!")
+            return
+        
         query = update.callback_query
+        if not query.data:
+            logger.error("❌ query.data is None!")
+            await query.answer("❌ Ошибка: нет данных в callback", show_alert=True)
+            return
+        
         data = query.data
         user = query.from_user
         
-        logger.info(f"🔔 Получен callback от {user.username or user.first_name}: {data}")
-        logger.info(f"Полная информация о callback: update_id={update.update_id}, user_id={user.id}")
+        logger.info(f"🔔 Получен callback от {user.username or user.first_name if user else 'Unknown'}: {data}")
+        logger.info(f"Полная информация о callback: update_id={update.update_id}, user_id={user.id if user else 'N/A'}")
         
         # Проверяем доступность notion_client
         if notion_client is None:
@@ -580,8 +589,12 @@ async def handle_callback(update: Update, context):
         
         logger.info(f"✅ notion_client доступен: {type(notion_client)}")
         
-        # Сначала отвечаем на callback
-        await query.answer()
+        # Сначала отвечаем на callback (важно делать это сразу)
+        try:
+            await query.answer()
+            logger.info("✅ Ответ на callback отправлен")
+        except Exception as e:
+            logger.error(f"Ошибка при отправке ответа на callback: {e}")
         
         if data.startswith('status:'):
             # Формат: status:page_id:status_name
@@ -617,29 +630,32 @@ async def handle_callback(update: Update, context):
                             if success:
                                 logger.info(f"Статус успешно обновлен в Notion: {status_name}")
                                 
-                                # Получаем текущее сообщение
-                                message_text = query.message.text
+                                # Обновляем сообщение, если оно существует
+                                if query.message:
+                                    try:
+                                        # Получаем текущее сообщение
+                                        message_text = query.message.text or query.message.caption or ""
+                                        
+                                        # Обновляем статус в тексте сообщения
+                                        updated_text = re.sub(
+                                            r'🔹 <b>Status:</b> .+',
+                                            f'🔹 <b>Status:</b> {status_name}',
+                                            message_text
+                                        )
+                                        
+                                        # Обновляем сообщение
+                                        await query.edit_message_text(
+                                            text=updated_text,
+                                            parse_mode="HTML",
+                                            reply_markup=query.message.reply_markup
+                                        )
+                                        
+                                        logger.info(f"✅ Сообщение обновлено со статусом: {status_name}")
+                                    except Exception as e:
+                                        logger.error(f"Ошибка при обновлении сообщения: {e}", exc_info=True)
                                 
-                                # Обновляем статус в тексте сообщения
-                                updated_text = re.sub(
-                                    r'🔹 <b>Status:</b> .+',
-                                    f'🔹 <b>Status:</b> {status_name}',
-                                    message_text
-                                )
-                                
-                                # Обновляем сообщение
-                                try:
-                                    await query.edit_message_text(
-                                        text=updated_text,
-                                        parse_mode="HTML",
-                                        reply_markup=query.message.reply_markup
-                                    )
-                                    
-                                    # Отправляем подтверждение
-                                    await query.answer(f"✅ Статус изменен на: {status_name}", show_alert=False)
-                                except Exception as e:
-                                    logger.error(f"Ошибка при обновлении сообщения: {e}")
-                                    await query.answer(f"✅ Статус обновлен: {status_name}", show_alert=True)
+                                # Отправляем подтверждение
+                                await query.answer(f"✅ Статус изменен на: {status_name}", show_alert=False)
                             else:
                                 logger.error("Не удалось обновить статус в Notion")
                                 await query.answer("❌ Ошибка при обновлении статуса в Notion", show_alert=True)
@@ -692,12 +708,12 @@ async def startup_event():
             global telegram_app
             telegram_app = Application.builder().token(bot_token).build()
             
-            # Добавляем обработчики
+            # Добавляем обработчики (важен порядок: CallbackQueryHandler должен быть перед MessageHandler)
             logger.info("Добавление обработчиков Telegram...")
             telegram_app.add_handler(CommandHandler("start", start_command))
+            telegram_app.add_handler(CallbackQueryHandler(handle_callback))  # Важно: перед MessageHandler!
             telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-            telegram_app.add_handler(CallbackQueryHandler(handle_callback))
-            logger.info("✅ Обработчики Telegram добавлены: start_command, handle_message, handle_callback")
+            logger.info("✅ Обработчики Telegram добавлены: start_command, callback_query, handle_message")
             
             # Инициализируем и запускаем Application для webhook
             try:
@@ -948,7 +964,16 @@ async def telegram_webhook(request: Request):
             )
         
         update_id = data.get('update_id')
-        logger.info(f"📥 Получено обновление от Telegram: update_id={update_id}")
+        update_type = None
+        if 'callback_query' in data:
+            update_type = 'callback_query'
+            callback_data = data.get('callback_query', {}).get('data', 'N/A')
+            logger.info(f"📥 Получено обновление от Telegram: update_id={update_id}, тип=callback_query, data={callback_data}")
+        elif 'message' in data:
+            update_type = 'message'
+            logger.info(f"📥 Получено обновление от Telegram: update_id={update_id}, тип=message")
+        else:
+            logger.info(f"📥 Получено обновление от Telegram: update_id={update_id}, тип=unknown, keys={list(data.keys())}")
         
         # Создаем объект Update из данных
         try:
@@ -956,6 +981,12 @@ async def telegram_webhook(request: Request):
             if not update:
                 logger.warning(f"Не удалось создать объект Update из данных: {data}")
                 return JSONResponse(content={"status": "ok"})
+            
+            # Проверяем тип обновления
+            if update.callback_query:
+                logger.info(f"🔔 Обнаружен callback_query: {update.callback_query.data}")
+            elif update.message:
+                logger.info(f"💬 Обнаружено message: {update.message.text}")
             
             # Обрабатываем обновление через Application
             await telegram_app.process_update(update)
