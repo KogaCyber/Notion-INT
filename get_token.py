@@ -29,12 +29,12 @@ async def verify_webhook(request: Request):
     logging.info(f"====================================")
     
     # Also save to a simple text file
-    with open("/home/max/verification_token.txt", "w") as f:
+    with open(os.path.expanduser('~/notionbot/test/Notion-INT/verification_token.txt'), "w") as f:
         f.write(f"{verification_token}")
     
     print(f"\n{'='*60}")
     print(f"TOKEN RECEIVED: {verification_token}")
-    print(f"Check file: /home/max/verification_token.txt")
+    print(f"Check file: {os.path.expanduser('~/notionbot/test/Notion-INT/verification_token.txt')}")
     print(f"{'='*60}\n")
     
     return {"status": "received"}
