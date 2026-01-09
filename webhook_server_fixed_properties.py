@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 
 from notion_integration import NotionIntegration
 from telegram_client import TelegramIntegration
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
 # Загрузка переменных окружения
@@ -501,66 +501,8 @@ class WebhookProcessor:
             # Форматируем улучшенное сообщение
             formatted_message = self.format_enhanced_telegram_message(extracted_data, event_type)
             
-            # Создаем inline кнопки для изменения статуса
-            reply_markup = None
-            if page_id and notion_client:
-                try:
-                    # Получаем доступные статусы
-                    self.logger.info(f"Получение опций статуса для страницы {page_id}...")
-                    status_options = notion_client.get_page_status_options(page_id)
-                    self.logger.info(f"Получены опции статуса: {status_options}")
-                    
-                    if status_options and len(status_options) > 0:
-                        keyboard = []
-                        # Группируем кнопки по 2 в ряд
-                        for i in range(0, len(status_options), 2):
-                            row = []
-                            status1 = status_options[i]
-                            callback1 = f"status:{page_id}:{status1}"
-                            callback1_len = len(callback1.encode('utf-8'))
-                            self.logger.info(f"Создаем кнопку: '{status1}' с callback: '{callback1}' (длина: {callback1_len} байт)")
-                            
-                            # Telegram ограничение: callback_data максимум 64 байта
-                            if callback1_len > 64:
-                                self.logger.warning(f"⚠️ Callback data слишком длинный ({callback1_len} > 64), обрезаем")
-                                # Обрезаем статус, оставляя место для префикса
-                                max_status_len = 64 - len(f"status:{page_id}:".encode('utf-8'))
-                                status1_short = status1[:max_status_len]
-                                callback1 = f"status:{page_id}:{status1_short}"
-                                self.logger.warning(f"⚠️ Обрезанный callback: '{callback1}'")
-                            
-                            row.append(InlineKeyboardButton(
-                                status1,
-                                callback_data=callback1
-                            ))
-                            if i + 1 < len(status_options):
-                                status2 = status_options[i + 1]
-                                callback2 = f"status:{page_id}:{status2}"
-                                callback2_len = len(callback2.encode('utf-8'))
-                                self.logger.info(f"Создаем кнопку: '{status2}' с callback: '{callback2}' (длина: {callback2_len} байт)")
-                                
-                                if callback2_len > 64:
-                                    self.logger.warning(f"⚠️ Callback data слишком длинный ({callback2_len} > 64), обрезаем")
-                                    max_status_len = 64 - len(f"status:{page_id}:".encode('utf-8'))
-                                    status2_short = status2[:max_status_len]
-                                    callback2 = f"status:{page_id}:{status2_short}"
-                                    self.logger.warning(f"⚠️ Обрезанный callback: '{callback2}'")
-                                
-                                row.append(InlineKeyboardButton(
-                                    status2,
-                                    callback_data=callback2
-                                ))
-                            keyboard.append(row)
-                        
-                        reply_markup = InlineKeyboardMarkup(keyboard)
-                        self.logger.info(f"Создано {len(keyboard)} рядов кнопок для изменения статуса")
-                    else:
-                        self.logger.warning(f"Нет опций статуса для страницы {page_id}")
-                except Exception as e:
-                    self.logger.error(f"Ошибка при создании кнопок статуса: {e}", exc_info=True)
-            
-            # Отправляем в Telegram с полными данными и кнопками
-            success = await telegram_client.send_custom_message(formatted_message, reply_markup=reply_markup)
+            # Отправляем в Telegram с полными данными (без inline кнопок)
+            success = await telegram_client.send_custom_message(formatted_message)
             if success:
                 self.logger.info(f"Событие {event_type} с полными данными успешно обработано для страницы {page_id}")
             else:
@@ -605,17 +547,10 @@ async def handle_message(update: Update, context):
                 # Получаем доступные статусы
                 status_options = notion_client.get_page_status_options(page_id)
                 if status_options:
-                    keyboard = []
-                    for status in status_options:
-                        keyboard.append([InlineKeyboardButton(
-                            status, 
-                            callback_data=f"status:{page_id}:{status}"
-                        )])
-                    
-                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    status_list = "\n".join([f"- {status}" for status in status_options])
                     await update.message.reply_text(
-                        "Выберите новый статус:",
-                        reply_markup=reply_markup
+                        f"Доступные статусы для страницы {page_id}:\n\n{status_list}\n\n"
+                        f"Для изменения статуса используйте API Notion напрямую."
                     )
                 else:
                     await update.message.reply_text("Не удалось получить список статусов")
@@ -750,8 +685,7 @@ async def handle_callback(update: Update, context):
                                         # Обновляем сообщение
                                         await query.edit_message_text(
                                             text=updated_text,
-                                            parse_mode="HTML",
-                                            reply_markup=query.message.reply_markup
+                                            parse_mode="HTML"
                                         )
                                         
                                         logger.info(f"✅ Сообщение обновлено со статусом: {status_name}")
