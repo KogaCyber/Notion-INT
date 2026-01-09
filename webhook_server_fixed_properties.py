@@ -45,7 +45,7 @@ async def log_requests(request: Request, call_next):
     """Логирование всех входящих запросов"""
     start_time = datetime.now()
     logger.info(f"Входящий запрос: {request.method} {request.url.path}?{request.url.query}")
-    logger.info(f"Headers: {dict(request.headers)}")
+    logger.info(f"Headers: {dict[str, str](request.headers)}")
     
     try:
         response = await call_next(request)
@@ -700,35 +700,29 @@ async def startup_event():
             logger.info("✅ Обработчики Telegram добавлены: start_command, handle_message, handle_callback")
             
             # Инициализируем и запускаем Application для webhook
-            async def init_telegram_webhook():
-                """Инициализация Telegram Application для webhook"""
-                try:
-                    logger.info("Инициализация Telegram Application для webhook...")
-                    await telegram_app.initialize()
-                    await telegram_app.start()
-                    logger.info("✅ Telegram Application инициализирован для webhook")
-                    
-                    # Настраиваем webhook URL
-                    webhook_url = os.getenv('TELEGRAM_WEBHOOK_URL', 'https://kosmosvip.org/telegram/webhook')
-                    logger.info(f"Настройка webhook URL: {webhook_url}")
-                    
-                    # Устанавливаем webhook
-                    await telegram_app.bot.set_webhook(
-                        url=webhook_url,
-                        allowed_updates=['message', 'callback_query'],
-                        drop_pending_updates=True
-                    )
-                    logger.info(f"✅ Telegram webhook настроен: {webhook_url}")
-                    
-                    # Проверяем информацию о webhook
-                    webhook_info = await telegram_app.bot.get_webhook_info()
-                    logger.info(f"Webhook info: {webhook_info}")
-                except Exception as e:
-                    logger.error(f"Ошибка при настройке Telegram webhook: {e}", exc_info=True)
-            
-            # Запускаем инициализацию webhook
-            asyncio.create_task(init_telegram_webhook())
-            logger.info("✅ Инициализация Telegram webhook запущена")
+            try:
+                logger.info("Инициализация Telegram Application для webhook...")
+                await telegram_app.initialize()
+                await telegram_app.start()
+                logger.info("✅ Telegram Application инициализирован для webhook")
+                
+                # Настраиваем webhook URL
+                webhook_url = os.getenv('TELEGRAM_WEBHOOK_URL', 'https://kosmosvip.org/telegram/webhook')
+                logger.info(f"Настройка webhook URL: {webhook_url}")
+                
+                # Устанавливаем webhook
+                await telegram_app.bot.set_webhook(
+                    url=webhook_url,
+                    allowed_updates=['message', 'callback_query'],
+                    drop_pending_updates=True
+                )
+                logger.info(f"✅ Telegram webhook настроен: {webhook_url}")
+                
+                # Проверяем информацию о webhook
+                webhook_info = await telegram_app.bot.get_webhook_info()
+                logger.info(f"Webhook info: {webhook_info}")
+            except Exception as e:
+                logger.error(f"Ошибка при настройке Telegram webhook: {e}", exc_info=True)
     except Exception as e:
         logger.error(f"Ошибка инициализации Telegram клиента: {e}")
 
@@ -935,15 +929,32 @@ async def telegram_webhook(request: Request):
                 content={"status": "error", "message": "Telegram application not initialized"}
             )
         
-        # Получаем данные обновления
-        data = await request.json()
-        logger.info(f"📥 Получено обновление от Telegram: update_id={data.get('update_id')}")
+        # Получаем сырое тело запроса
+        body = await request.body()
+        logger.info(f"📥 Получен запрос от Telegram, размер: {len(body)} байт")
+        
+        if not body:
+            logger.warning("Пустое тело запроса от Telegram")
+            return JSONResponse(content={"status": "ok"})
+        
+        # Парсим JSON
+        try:
+            data = json.loads(body.decode('utf-8'))
+        except json.JSONDecodeError as e:
+            logger.error(f"Ошибка парсинга JSON от Telegram: {e}, тело: {body[:200]}")
+            return JSONResponse(
+                status_code=400,
+                content={"status": "error", "message": "Invalid JSON"}
+            )
+        
+        update_id = data.get('update_id')
+        logger.info(f"📥 Получено обновление от Telegram: update_id={update_id}")
         
         # Создаем объект Update из данных
         try:
             update = Update.de_json(data, telegram_app.bot)
             if not update:
-                logger.warning("Не удалось создать объект Update из данных")
+                logger.warning(f"Не удалось создать объект Update из данных: {data}")
                 return JSONResponse(content={"status": "ok"})
             
             # Обрабатываем обновление через Application
@@ -954,17 +965,13 @@ async def telegram_webhook(request: Request):
             
         except Exception as e:
             logger.error(f"Ошибка при обработке обновления Telegram: {e}", exc_info=True)
-            return JSONResponse(
-                status_code=500,
-                content={"status": "error", "message": str(e)}
-            )
+            # Все равно возвращаем 200, чтобы Telegram не повторял запрос
+            return JSONResponse(content={"status": "ok"})
             
     except Exception as e:
-        logger.error(f"Ошибка при обработке Telegram webhook: {e}", exc_info=True)
-        return JSONResponse(
-            status_code=500,
-            content={"status": "error", "message": str(e)}
-        )
+        logger.error(f"Критическая ошибка при обработке Telegram webhook: {e}", exc_info=True)
+        # Возвращаем 200, чтобы Telegram не повторял запрос
+        return JSONResponse(content={"status": "ok"})
 
 @app.on_event("shutdown")
 async def shutdown_event():
