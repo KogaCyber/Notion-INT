@@ -11,7 +11,6 @@ import hmac
 import hashlib
 import json
 import re
-import threading
 from datetime import datetime
 from typing import Dict, Any, List
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
@@ -687,7 +686,7 @@ async def startup_event():
         )
         logger.info("Telegram клиент инициализирован")
         
-        # Инициализируем Telegram Application для обработки сообщений
+        # Инициализируем Telegram Application для обработки сообщений через webhook
         bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
         if bot_token:
             global telegram_app
@@ -700,38 +699,36 @@ async def startup_event():
             telegram_app.add_handler(CallbackQueryHandler(handle_callback))
             logger.info("✅ Обработчики Telegram добавлены: start_command, handle_message, handle_callback")
             
-            # Запускаем polling в отдельном потоке
-            def run_polling():
-                """Запуск polling в отдельном потоке"""
+            # Инициализируем и запускаем Application для webhook
+            async def init_telegram_webhook():
+                """Инициализация Telegram Application для webhook"""
                 try:
-                    logger.info("Создание нового event loop для Telegram polling...")
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
+                    logger.info("Инициализация Telegram Application для webhook...")
+                    await telegram_app.initialize()
+                    await telegram_app.start()
+                    logger.info("✅ Telegram Application инициализирован для webhook")
                     
-                    async def init_and_run():
-                        logger.info("Инициализация Telegram Application...")
-                        await telegram_app.initialize()
-                        logger.info("Запуск Telegram Application...")
-                        await telegram_app.start()
-                        logger.info("Telegram bot инициализирован и запущен, начинаем polling...")
-                        await telegram_app.updater.start_polling(
-                            drop_pending_updates=True,
-                            allowed_updates=['message', 'callback_query']
-                        )
-                        logger.info("✅ Telegram bot polling успешно запущен и работает!")
+                    # Настраиваем webhook URL
+                    webhook_url = os.getenv('TELEGRAM_WEBHOOK_URL', 'https://kosmosvip.org/telegram/webhook')
+                    logger.info(f"Настройка webhook URL: {webhook_url}")
                     
-                    logger.info("Запуск async функций в event loop...")
-                    loop.run_until_complete(init_and_run())
-                    logger.info("Event loop запущен, polling работает...")
-                    loop.run_forever()
+                    # Устанавливаем webhook
+                    await telegram_app.bot.set_webhook(
+                        url=webhook_url,
+                        allowed_updates=['message', 'callback_query'],
+                        drop_pending_updates=True
+                    )
+                    logger.info(f"✅ Telegram webhook настроен: {webhook_url}")
+                    
+                    # Проверяем информацию о webhook
+                    webhook_info = await telegram_app.bot.get_webhook_info()
+                    logger.info(f"Webhook info: {webhook_info}")
                 except Exception as e:
-                    logger.error(f"Ошибка при запуске Telegram polling: {e}", exc_info=True)
+                    logger.error(f"Ошибка при настройке Telegram webhook: {e}", exc_info=True)
             
-            # Запускаем в отдельном потоке
-            logger.info("Создание потока для Telegram polling...")
-            polling_thread = threading.Thread(target=run_polling, daemon=True, name="TelegramPolling")
-            polling_thread.start()
-            logger.info("✅ Поток для Telegram polling запущен")
+            # Запускаем инициализацию webhook
+            asyncio.create_task(init_telegram_webhook())
+            logger.info("✅ Инициализация Telegram webhook запущена")
     except Exception as e:
         logger.error(f"Ошибка инициализации Telegram клиента: {e}")
 
@@ -929,88 +926,45 @@ async def test_send(request: Request):
 
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request):
-    """Обработка входящих сообщений из Telegram для создания страниц в Notion"""
+    """Обработка webhook обновлений от Telegram"""
     try:
+        if not telegram_app:
+            logger.error("Telegram Application не инициализирован")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "error", "message": "Telegram application not initialized"}
+            )
+        
+        # Получаем данные обновления
         data = await request.json()
-        logger.info(f"Получено сообщение из Telegram: {json.dumps(data, indent=2)}")
+        logger.info(f"📥 Получено обновление от Telegram: update_id={data.get('update_id')}")
         
-        # Обработка обновления от Telegram
-        update_type = data.get('update_id')
-        message = data.get('message', {})
-        
-        if not message:
-            # Это может быть другое обновление (редактирование, callback и т.д.)
-            return {"status": "ok", "message": "Update processed"}
-        
-        # Получаем текст сообщения
-        text = message.get('text', '').strip()
-        if not text:
-            return {"status": "ok", "message": "No text in message"}
-        
-        # Получаем информацию об отправителе
-        from_user = message.get('from', {})
-        user_name = from_user.get('username', from_user.get('first_name', 'Unknown'))
-        
-        logger.info(f"Сообщение от {user_name}: {text}")
-        
-        # Проверяем, что у нас есть notion_client
-        if not notion_client:
-            logger.error("Notion клиент не инициализирован")
-            return {"status": "error", "message": "Notion client not initialized"}
-        
-        # Получаем database_id из переменных окружения
-        database_id = os.getenv('NOTION_DATABASE_ID')
-        if not database_id:
-            logger.error("NOTION_DATABASE_ID не указан")
-            return {"status": "error", "message": "Database ID not configured"}
-        
-        # Создаем страницу в Notion
-        # Форматируем заголовок: первые 100 символов текста
-        title = text[:100] if len(text) > 100 else text
-        
-        # Создаем страницу
-        created_page = notion_client.create_page(
-            title=title,
-            database_id=database_id
-        )
-        
-        if created_page:
-            page_id = created_page.get('id')
-            page_url = created_page.get('url', '')
+        # Создаем объект Update из данных
+        try:
+            update = Update.de_json(data, telegram_app.bot)
+            if not update:
+                logger.warning("Не удалось создать объект Update из данных")
+                return JSONResponse(content={"status": "ok"})
             
-            # Добавляем полный текст как содержимое страницы
-            if len(text) > 100:
-                notion_client.add_content_to_page(page_id, text)
+            # Обрабатываем обновление через Application
+            await telegram_app.process_update(update)
+            logger.info(f"✅ Обновление {update.update_id} обработано")
             
-            # Добавляем метаданные (от кого сообщение)
-            metadata_text = f"\n\nОт: {user_name} (@{from_user.get('username', 'unknown')})"
-            if from_user.get('first_name'):
-                metadata_text += f" ({from_user.get('first_name')})"
-            if from_user.get('last_name'):
-                metadata_text += f" {from_user.get('last_name')}"
+            return JSONResponse(content={"status": "ok"})
             
-            notion_client.add_content_to_page(page_id, metadata_text)
-            
-            logger.info(f"Создана страница в Notion: {page_url}")
-            
-            # Отправляем подтверждение в Telegram (если нужно)
-            if telegram_client:
-                response_text = f"✅ Страница создана в Notion!\n🔗 [Открыть]({page_url})"
-                await telegram_client.send_custom_message(response_text)
-            
-            return {
-                "status": "ok",
-                "message": "Page created",
-                "page_id": page_id,
-                "page_url": page_url
-            }
-        else:
-            logger.error("Не удалось создать страницу в Notion")
-            return {"status": "error", "message": "Failed to create page"}
+        except Exception as e:
+            logger.error(f"Ошибка при обработке обновления Telegram: {e}", exc_info=True)
+            return JSONResponse(
+                status_code=500,
+                content={"status": "error", "message": str(e)}
+            )
             
     except Exception as e:
-        logger.error(f"Ошибка при обработке Telegram webhook: {e}")
-        return {"status": "error", "message": str(e)}
+        logger.error(f"Ошибка при обработке Telegram webhook: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": str(e)}
+        )
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -1018,12 +972,16 @@ async def shutdown_event():
     global telegram_app
     if telegram_app:
         try:
-            await telegram_app.updater.stop()
+            # Удаляем webhook
+            logger.info("Удаление Telegram webhook...")
+            await telegram_app.bot.delete_webhook(drop_pending_updates=False)
+            
+            # Останавливаем Application
             await telegram_app.stop()
             await telegram_app.shutdown()
-            logger.info("Telegram bot остановлен")
+            logger.info("✅ Telegram bot остановлен")
         except Exception as e:
-            logger.error(f"Ошибка при остановке Telegram bot: {e}")
+            logger.error(f"Ошибка при остановке Telegram bot: {e}", exc_info=True)
 
 if __name__ == "__main__":
     host = os.getenv('WEBHOOK_HOST', '0.0.0.0')
