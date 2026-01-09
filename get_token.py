@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request
 import uvicorn
 import logging
+import os
 from datetime import datetime
 
 app = FastAPI()
@@ -10,7 +11,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(message)s',
     handlers=[
-        logging.FileHandler('~/notionbot/test/Notion-INT/notion_webhook.log'),  # Save in your home directory
+        logging.FileHandler(os.path.expanduser('~/notionbot/test/Notion-INT/notion_webhook.log')),  # Save in your home directory
         logging.StreamHandler()
     ]
 )
