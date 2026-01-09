@@ -40,6 +40,23 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Notion-Telegram Webhook", version="1.0.0")
 
+# Middleware для логирования всех запросов
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Логирование всех входящих запросов"""
+    start_time = datetime.now()
+    logger.info(f"Входящий запрос: {request.method} {request.url.path}?{request.url.query}")
+    logger.info(f"Headers: {dict(request.headers)}")
+    
+    try:
+        response = await call_next(request)
+        process_time = (datetime.now() - start_time).total_seconds()
+        logger.info(f"Ответ: {response.status_code} за {process_time:.3f}с")
+        return response
+    except Exception as e:
+        logger.error(f"Ошибка при обработке запроса: {e}", exc_info=True)
+        raise
+
 # Инициализация клиентов
 notion_client = None
 telegram_client = None
@@ -732,6 +749,16 @@ async def health_check():
         "timestamp": datetime.now().isoformat()
     }
 
+@app.get("/test/notion-webhook")
+async def test_notion_webhook():
+    """Тестовый endpoint для проверки доступности /notion-webhook"""
+    return {
+        "status": "ok",
+        "message": "Endpoint /notion-webhook доступен",
+        "test_url": "/notion-webhook?verification=test_token",
+        "timestamp": datetime.now().isoformat()
+    }
+
 @app.get("/webhook/notion")
 async def webhook_verification(challenge: str = None, verification: str = None):
     """Обработка запросов верификации"""
@@ -742,25 +769,53 @@ async def webhook_verification(challenge: str = None, verification: str = None):
         return {"challenge": token}
     return {"status": "no challenge provided"}
 
+@app.options("/notion-webhook")
+async def notion_webhook_options():
+    """Обработка OPTIONS запросов для CORS"""
+    return JSONResponse(
+        content={"status": "ok"},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
+
 @app.get("/notion-webhook")
 async def notion_webhook_verification(request: Request):
     """Обработка верификации webhook от Notion на /notion-webhook"""
-    # Notion может отправлять параметр как "verification" или "challenge"
-    verification_token = request.query_params.get("verification") or request.query_params.get("challenge")
-    
-    if verification_token:
-        logger.info(f"=== NOTION VERIFICATION REQUEST ===")
-        logger.info(f"Token: {verification_token}")
-        logger.info(f"Time: {datetime.now()}")
-        logger.info(f"Full URL: {request.url}")
-        logger.info(f"IP: {request.client.host if request.client else 'Unknown'}")
-        logger.info(f"====================================")
+    try:
+        # Логируем все query параметры
+        logger.info(f"Все query параметры: {dict(request.query_params)}")
         
-        # Notion ожидает получить токен обратно в ответе
-        return {"challenge": verification_token}
-    
-    logger.warning("Верификационный запрос без токена")
-    return {"status": "no verification token provided"}
+        # Notion может отправлять параметр как "verification" или "challenge"
+        verification_token = request.query_params.get("verification") or request.query_params.get("challenge")
+        
+        if verification_token:
+            logger.info(f"=== NOTION VERIFICATION REQUEST ===")
+            logger.info(f"Token: {verification_token}")
+            logger.info(f"Time: {datetime.now()}")
+            logger.info(f"Full URL: {request.url}")
+            logger.info(f"IP: {request.client.host if request.client else 'Unknown'}")
+            logger.info(f"Headers: {dict(request.headers)}")
+            logger.info(f"====================================")
+            
+            # Notion ожидает получить токен обратно в ответе
+            response_data = {"challenge": verification_token}
+            logger.info(f"Отправляем ответ: {response_data}")
+            return JSONResponse(content=response_data)
+        
+        logger.warning(f"Верификационный запрос без токена. Query params: {dict(request.query_params)}")
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "message": "no verification token provided"}
+        )
+    except Exception as e:
+        logger.error(f"Ошибка при обработке верификации: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": str(e)}
+        )
 
 @app.post("/notion-webhook")
 async def notion_webhook_post(request: Request, background_tasks: BackgroundTasks):
