@@ -733,12 +733,72 @@ async def health_check():
     }
 
 @app.get("/webhook/notion")
-async def webhook_verification(challenge: str = None):
+async def webhook_verification(challenge: str = None, verification: str = None):
     """Обработка запросов верификации"""
-    if challenge:
-        logger.info(f"Получен challenge для верификации: {challenge}")
-        return {"challenge": challenge}
+    # Notion может отправлять параметр как "challenge" или "verification"
+    token = challenge or verification
+    if token:
+        logger.info(f"Получен токен для верификации: {token}")
+        return {"challenge": token}
     return {"status": "no challenge provided"}
+
+@app.get("/notion-webhook")
+async def notion_webhook_verification(request: Request):
+    """Обработка верификации webhook от Notion на /notion-webhook"""
+    # Notion может отправлять параметр как "verification" или "challenge"
+    verification_token = request.query_params.get("verification") or request.query_params.get("challenge")
+    
+    if verification_token:
+        logger.info(f"=== NOTION VERIFICATION REQUEST ===")
+        logger.info(f"Token: {verification_token}")
+        logger.info(f"Time: {datetime.now()}")
+        logger.info(f"Full URL: {request.url}")
+        logger.info(f"IP: {request.client.host if request.client else 'Unknown'}")
+        logger.info(f"====================================")
+        
+        # Notion ожидает получить токен обратно в ответе
+        return {"challenge": verification_token}
+    
+    logger.warning("Верификационный запрос без токена")
+    return {"status": "no verification token provided"}
+
+@app.post("/notion-webhook")
+async def notion_webhook_post(request: Request, background_tasks: BackgroundTasks):
+    """Обработка POST запросов от Notion на /notion-webhook"""
+    try:
+        # Получаем тело запроса
+        body = await request.body()
+        
+        # Логируем сырые данные
+        logger.info(f"Получены POST данные на /notion-webhook: {body}")
+        
+        # Получаем подпись
+        signature = request.headers.get('notion-signature', '')
+        
+        # Проверяем подпись
+        if not webhook_processor.verify_signature(body, signature):
+            logger.warning("Неверная подпись webhook")
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        
+        # Парсим JSON
+        try:
+            event_data = json.loads(body.decode('utf-8'))
+        except json.JSONDecodeError as e:
+            logger.error(f"Ошибка парсинга JSON: {e}")
+            raise HTTPException(status_code=400, detail="Invalid JSON")
+        
+        logger.info("Webhook событие принято на /notion-webhook")
+        
+        # Обрабатываем событие в фоне
+        background_tasks.add_task(webhook_processor.process_webhook_event, event_data)
+        
+        return {"status": "ok", "message": "Event processed"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Ошибка при обработке webhook: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/")
 async def webhook_root(request: Request, background_tasks: BackgroundTasks):
