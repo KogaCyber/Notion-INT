@@ -234,15 +234,16 @@ class WebhookProcessor:
             # Извлекаем ВСЕ возможные поля
             extracted_data = {
                 'id': page_data.get('id', ''),
-                'title': self._extract_title(properties),
+                'title': self._extract_title(properties),  # Vazifa nomi (1-я колонка)
                 'department': hierarchy_components.get('department', ''),
                 'project': hierarchy_components.get('project', ''),
                 'tasks': hierarchy_components.get('tasks', ''),
+                'loyiha': self._extract_relation(properties, 'Loyiha'),  # Loyiha (7-я колонка)
                 'description': self._extract_rich_text(properties, 'Description'),
                 'status': self._extract_status(properties, 'Status'),
-                'deadline': self._extract_date(properties, 'Deadline'),
+                'deadline': self._extract_date(properties, 'Deadline'),  # Deadline (4-я колонка)
                 'start_date': self._extract_date(properties, 'Start Date'),
-                'executor': self._extract_people(properties, 'Executor'),
+                'executor': self._extract_people(properties, 'Executor'),  # Ma'sul Xodim (5-я колонка)
                 'assigned_by': self._extract_people(properties, 'Assigned By'),
                 'telegram_username': self._extract_multi_select(properties, 'Telegram Username'),
                 'project_relation': self._extract_relation(properties, 'Projects (1)'),
@@ -961,41 +962,9 @@ async def notion_webhook_post(request: Request, background_tasks: BackgroundTask
 
 @app.post("/")
 async def webhook_root(request: Request, background_tasks: BackgroundTasks):
-    """Обработка webhook событий на корневом URL"""
-    try:
-        # Получаем тело запроса
-        body = await request.body()
-        
-        # Логируем сырые данные
-        logger.info(f"Получены сырые данные: {body}")
-        
-        # Получаем подпись
-        signature = request.headers.get('notion-signature', '')
-        
-        # Проверяем подпись
-        if not webhook_processor.verify_signature(body, signature):
-            logger.warning("Неверная подпись webhook")
-            raise HTTPException(status_code=401, detail="Unauthorized")
-        
-        # Парсим JSON
-        try:
-            event_data = json.loads(body.decode('utf-8'))
-        except json.JSONDecodeError as e:
-            logger.error(f"Ошибка парсинга JSON: {e}")
-            raise HTTPException(status_code=400, detail="Invalid JSON")
-        
-        logger.info("Webhook событие принято на корневом URL")
-        
-        # Обрабатываем событие в фоне
-        background_tasks.add_task(webhook_processor.process_webhook_event, event_data)
-        
-        return {"status": "ok", "message": "Event processed"}
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Ошибка при обработке webhook: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+    """Обработка webhook событий на корневом URL (отключено для предотвращения дублирования)"""
+    # Отключено - используйте /notion-webhook для обработки событий
+    return {"status": "ok", "message": "Use /notion-webhook endpoint for webhook events"}
 
 @app.post("/test/send")
 async def test_send(request: Request):
