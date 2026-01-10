@@ -228,6 +228,12 @@ class WebhookProcessor:
         try:
             properties = page_data.get('properties', {})
             
+            # Логируем все свойства для отладки
+            self.logger.info(f"Все свойства страницы: {list(properties.keys())}")
+            for prop_name, prop_value in properties.items():
+                prop_type = prop_value.get('type', 'unknown')
+                self.logger.info(f"  - {prop_name}: тип={prop_type}")
+            
             # Получаем компоненты иерархии отдельно
             hierarchy_components = self.get_hierarchy_components(page_data.get('id', ''), database_id)
             
@@ -243,7 +249,7 @@ class WebhookProcessor:
                 'status': self._extract_status(properties, 'Status'),
                 'deadline': self._extract_date(properties, 'Deadline'),  # Deadline (4-я колонка)
                 'start_date': self._extract_date(properties, 'Start Date'),
-                'executor': self._extract_people(properties, 'Executor'),  # Ma'sul Xodim (5-я колонка)
+                'executor': self._extract_masul_xodim(properties),  # Ma'sul Xodim (5-я колонка)
                 'assigned_by': self._extract_people(properties, 'Assigned By'),
                 'telegram_username': self._extract_multi_select(properties, 'Telegram Username'),
                 'project_relation': self._extract_relation(properties, 'Projects (1)'),
@@ -295,6 +301,53 @@ class WebhookProcessor:
         prop = properties.get(prop_name, {})
         if prop.get('type') == 'date' and prop.get('date'):
             return prop['date'].get('start', '')
+        return ''
+    
+    def _extract_masul_xodim(self, properties: Dict) -> str:
+        """Извлечение Ma'sul Xodim (ответственный сотрудник) с разными вариантами названий"""
+        # Пробуем разные варианты названий поля
+        possible_names = [
+            "Ma'sul Xodim",
+            "Ma'sul shaxs",
+            "Masul Xodim",
+            "Masul shaxs",
+            "Ma'sul xodim",
+            "Masul xodim",
+            "Executor",
+            "Responsible",
+            "Ответственный"
+        ]
+        
+        for prop_name in possible_names:
+            if prop_name in properties:
+                prop = properties[prop_name]
+                prop_type = prop.get('type', '')
+                
+                # Если это people
+                if prop_type == 'people':
+                    people_array = prop.get('people', [])
+                    if people_array:
+                        name = people_array[0].get('name', '')
+                        if name:
+                            self.logger.info(f"Найдено Ma'sul Xodim (people): {prop_name} = {name}")
+                            return name
+                
+                # Если это relation
+                elif prop_type == 'relation':
+                    relation_array = prop.get('relation', [])
+                    if relation_array:
+                        related_id = relation_array[0].get('id', '')
+                        try:
+                            related_data = notion_client.get_page_data(related_id)
+                            if related_data:
+                                related_title = self._extract_title(related_data.get('properties', {}))
+                                if related_title:
+                                    self.logger.info(f"Найдено Ma'sul Xodim (relation): {prop_name} = {related_title}")
+                                    return related_title
+                        except Exception as e:
+                            self.logger.error(f"Ошибка получения Ma'sul Xodim из relation: {e}")
+        
+        self.logger.warning("Ma'sul Xodim не найден ни в одном из возможных полей")
         return ''
     
     def _extract_people(self, properties: Dict, prop_name: str) -> str:
