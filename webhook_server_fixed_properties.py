@@ -382,43 +382,29 @@ class WebhookProcessor:
             else:
                 event_text = "🔔 <b>TASK CHANGE</b>"
             
-            message = f"{event_text}\n"
-            if data.get('department'):
-                message += f"🏢 <b>Department:</b> {data.get('department')}\n"
-            if data.get('project'):
-                message += f"📁 <b>Project:</b> {data.get('project')}\n"
-            if data.get('tasks'):
-                message += f"📋 <b>Tasks:</b> {data.get('tasks')}\n\n"
-
+            message = f"{event_text}\n\n"
             
-
-            message += f"📌 <b>Title:</b> {data.get('title', 'No Title')}\n"
-
-            if data.get('description'):
-                desc = data.get('description')
-                message += f"📝 <b>Description:</b> {desc}\n\n"
+            # 1. Vazifa nomi (название задачи)
+            title = data.get('title', 'No Title')
+            if title:
+                message += f"📌 <b>Vazifa nomi:</b> {title}\n"
             
-            if data.get('status'):
-                message += f"🔹 <b>Status:</b> {data.get('status')}\n"
-
-            # Исполнитель
-            if data.get('executor'):
-                message += f"👤 <b>Executor:</b> {data.get('executor')}\n"
+            # 2. Proekt (проект из поля loyiha)
+            loyiha = data.get('loyiha', '')
+            if loyiha:
+                message += f"📁 <b>Proekt:</b> {loyiha}\n"
             
-            # Назначил
-            if data.get('assigned_by'):
-                message += f"👨‍💼 <b>Assigned by:</b> {data.get('assigned_by')}\n"
+            # 3. Deadline (дедлайн)
+            deadline = data.get('deadline', '')
+            if deadline:
+                message += f"⏰ <b>Deadline:</b> {deadline}\n"
             
-            # Дедлайн
-            if data.get('deadline'):
-                message += f"⏰ <b>Deadline:</b> {data.get('deadline')}\n"
+            # 4. Masul shaxs (ответственный сотрудник)
+            executor = data.get('executor', '')
+            if executor:
+                message += f"👤 <b>Masul shaxs:</b> {executor}\n"
             
-            # Telegram пользователи
-            if data.get('telegram_username'):
-                telegram_str = " ".join([f"{user}" for user in data.get('telegram_username', [])])
-                message += f"📱 <b>Telegram:</b> {telegram_str}\n"
-
-            # Ссылка
+            # Ссылка на Notion
             if data.get('url'):
                 message += f"\n🔗 <a href='{data.get('url')}'>Open in Notion</a>"
             
